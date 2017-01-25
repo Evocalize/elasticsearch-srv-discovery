@@ -48,7 +48,8 @@ public class SrvtestUnicastHostsProvider extends SrvUnicastHostsProvider {
                 public Message send(Message query) throws IOException {
                     final String HOSTNAME = "localhost.";
 
-                    if (query.getQuestion().getName().toString().equals(Constants.TEST_QUERY)) {
+                    String queryQuestionName = query.getQuestion().getName().toString();
+                    if (queryQuestionName.equals(Constants.TEST_QUERY)) {
                         Record question = Record.newRecord(query.getQuestion().getName(), Type.SRV, DClass.IN);
                         Message queryMessage = Message.newQuery(question);
 
@@ -64,7 +65,7 @@ public class SrvtestUnicastHostsProvider extends SrvUnicastHostsProvider {
                         return result;
                     }
 
-                    if (query.getQuestion().getName().toString().equals(HOSTNAME)) {
+                    if (queryQuestionName.equals(HOSTNAME)) {
                         Record question = Record.newRecord(query.getQuestion().getName(), Type.A, DClass.IN);
                         Message queryMessage = Message.newQuery(question);
 
@@ -76,7 +77,7 @@ public class SrvtestUnicastHostsProvider extends SrvUnicastHostsProvider {
                         return result;
                     }
 
-                    throw new IllegalArgumentException("Unknown test query: " + query.getQuestion().getName().toString());
+                    throw new IllegalArgumentException("Unknown test query: " + queryQuestionName);
                 }
             };
         } catch (UnknownHostException e) {

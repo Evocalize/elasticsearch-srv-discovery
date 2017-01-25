@@ -29,6 +29,7 @@ import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.collect.Lists;
 import org.elasticsearch.common.component.AbstractComponent;
 import org.elasticsearch.common.inject.Inject;
+import org.elasticsearch.common.net.InetAddresses;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.TransportAddress;
 import org.elasticsearch.discovery.zen.ping.unicast.UnicastHostsProvider;
@@ -36,9 +37,7 @@ import org.elasticsearch.transport.TransportService;
 import org.xbill.DNS.*;
 
 import java.net.UnknownHostException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
 /**
  *
@@ -71,7 +70,8 @@ public class SrvUnicastHostsProvider extends AbstractComponent implements Unicas
     @Nullable
     protected Resolver buildResolver(Settings settings) {
         String[] addresses = settings.getAsArray(DISCOVERY_SRV_SERVERS);
-        logger.debug("Using servers {}", addresses);
+        List<String> list = addresses == null ? Collections.<String>emptyList() : Arrays.asList(addresses);
+        logger.debug("Using servers {}", list);
 
         // Use tcp by default since it retrieves all records
         String protocol = settings.get(DISCOVERY_SRV_PROTOCOL, "tcp");
@@ -123,9 +123,12 @@ public class SrvUnicastHostsProvider extends AbstractComponent implements Unicas
             }
         }
 
-        parent_resolver = parent_resolver == null ? Lookup.getDefaultResolver() : parent_resolver;
+        if (parent_resolver == null) {
+            logger.info("Using default resolver");
+            parent_resolver = Lookup.getDefaultResolver();
+        }
 
-        if (protocol == "tcp") {
+        if (Objects.equals(protocol, "tcp")) {
             parent_resolver.setTCP(true);
         }
 
@@ -153,12 +156,17 @@ public class SrvUnicastHostsProvider extends AbstractComponent implements Unicas
     }
 
     protected List<Record> lookupRecords(String query, int type) throws TextParseException {
+        logger.debug("lookup record {} of type {}", query, Type.string(type));
         Lookup lookup = new Lookup(query, type);
         if (this.resolver != null) {
             lookup.setResolver(this.resolver);
         }
 
         Record[] records = lookup.run();
+        if (records == null || records.length == 0) {
+            logger.warn("no records found for {} type {}", query, Type.string(type));
+        }
+
         return records == null ? new ArrayList<Record>() : Arrays.asList(records);
     }
 
@@ -167,20 +175,41 @@ public class SrvUnicastHostsProvider extends AbstractComponent implements Unicas
 
         for (Record srvRecord : lookupRecords(query, Type.SRV)) {
             logger.trace("Found SRV record {}", srvRecord);
-            for (Record aRecord : lookupRecords(((SRVRecord) srvRecord).getTarget().toString(), Type.A)) {
-                logger.trace("Found A record {} for SRV record", aRecord, srvRecord);
-                String address = ((ARecord) aRecord).getAddress().getHostAddress() + ":" + ((SRVRecord) srvRecord).getPort();
-                try {
-                    for (TransportAddress transportAddress : transportService.addressesFromString(address)) {
-                        logger.trace("adding {}, transport_address {}", address, transportAddress);
-                        discoNodes.add(new DiscoveryNode("#srv-" + address + "-" + transportAddress, transportAddress, version.minimumCompatibilityVersion()));
-                    }
-                } catch (Exception e) {
-                    logger.warn("failed to add {}, address {}", e, address);
+            Name target = ((SRVRecord) srvRecord).getTarget();
+            int targetPort = ((SRVRecord) srvRecord).getPort();
+
+            String targetWithoutDot = target.toString(true);
+            if (InetAddresses.isInetAddress(targetWithoutDot)) {
+                logger.info("found bare address {}, using without lookup", targetWithoutDot);
+                String address = targetWithoutDot + ":" + targetPort;
+                addDiscoNode(discoNodes, address);
+            } else {
+                List<Record> records = lookupRecords(targetWithoutDot, Type.A);
+                if (records.isEmpty()) {
+                    String targetWithDot = target.toString(false);
+                    records = lookupRecords(targetWithDot, Type.A);
+                }
+
+                for (Record aRecord : records) {
+                    logger.trace("Found A record {} for SRV record", aRecord, srvRecord);
+                    String address = ((ARecord) aRecord).getAddress().getHostAddress() + ":" + targetPort;
+
+                    addDiscoNode(discoNodes, address);
                 }
             }
         }
 
         return discoNodes;
+    }
+
+    private void addDiscoNode(List<DiscoveryNode> discoNodes, String address) {
+        try {
+            for (TransportAddress transportAddress : transportService.addressesFromString(address)) {
+                logger.trace("adding {}, transport_address {}", address, transportAddress);
+                discoNodes.add(new DiscoveryNode("#srv-" + address + "-" + transportAddress, transportAddress, version.minimumCompatibilityVersion()));
+            }
+        } catch (Exception e) {
+            logger.warn("failed to add {}, address {}", e, address);
+        }
     }
 }
